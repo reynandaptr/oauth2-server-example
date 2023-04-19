@@ -2,23 +2,23 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	ginserver "github.com/go-oauth2/gin-server"
+	"github.com/go-oauth2/oauth2/v4/errors"
+	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/go-oauth2/oauth2/v4/models"
+	"github.com/go-oauth2/oauth2/v4/server"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v4"
 	"github.com/sirupsen/logrus"
-	pg "github.com/vgarvardt/go-oauth2-pg/v3"
+	pg "github.com/vgarvardt/go-oauth2-pg/v4"
 	"github.com/vgarvardt/go-pg-adapter/pgx4adapter"
-	"gopkg.in/oauth2.v3/manage"
-	"gopkg.in/oauth2.v3/models"
-
-	"gopkg.in/oauth2.v3/errors"
-	"gopkg.in/oauth2.v3/server"
 )
 
 func main() {
@@ -38,35 +38,28 @@ func main() {
 
 	manager.MapTokenStorage(tokenStore)
 	manager.MapClientStorage(clientStore)
+	manager.SetRefreshTokenCfg(manage.DefaultRefreshTokenCfg)
 
-	srv := server.NewDefaultServer(manager)
-	srv.SetAllowGetAccessRequest(true)
-	srv.SetClientInfoHandler(server.ClientBasicHandler)
+	ginserver.InitServer(manager)
+	ginserver.SetAllowGetAccessRequest(true)
+	ginserver.SetClientInfoHandler(server.ClientBasicHandler)
 
-	srv.SetUserAuthorizationHandler(func(w http.ResponseWriter, r *http.Request) (userID string, err error) {
+	ginserver.SetUserAuthorizationHandler(func(w http.ResponseWriter, r *http.Request) (userID string, err error) {
 		return "1", nil
 	})
 
-	manager.SetRefreshTokenCfg(manage.DefaultRefreshTokenCfg)
-
-	srv.SetInternalErrorHandler(func(err error) (re *errors.Response) {
+	ginserver.SetInternalErrorHandler(func(err error) (re *errors.Response) {
 		log.Println("Internal Error:", err.Error())
 		return
 	})
 
-	srv.SetResponseErrorHandler(func(re *errors.Response) {
+	ginserver.SetResponseErrorHandler(func(re *errors.Response) {
 		log.Println("Response Error:", re.Error.Error())
 	})
 
-	http.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		srv.HandleTokenRequest(w, r)
-	})
-
-	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		srv.HandleAuthorizeRequest(w, r)
-	})
-
-	http.HandleFunc("/credentials", func(w http.ResponseWriter, r *http.Request) {
+	g := gin.Default()
+	auth := g.Group("/oauth2")
+	auth.GET("/credentials", func(ctx *gin.Context) {
 		clientId := uuid.New().String()[:8]
 		clientSecret := uuid.New().String()[:8]
 		err := clientStore.Create(&models.Client{
@@ -79,41 +72,30 @@ func main() {
 			fmt.Println(err.Error())
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"client_id": clientId, "client_secret": clientSecret})
+		ctx.Header("Content-Type", "application/json")
+		ctx.JSON(http.StatusOK, gin.H{"client_id": clientId, "client_secret": clientSecret})
 	})
+	auth.GET("/auth", ginserver.HandleAuthorizeRequest)
+	auth.POST("/token", ginserver.HandleTokenRequest)
+	auth.POST("/revocation", func(ctx *gin.Context) {
+		accessToken := ctx.Request.FormValue("access_token")
 
-	http.Handle("/revocation", validateToken(func(w http.ResponseWriter, r *http.Request) {
-		accessToken := r.FormValue("access_token")
-		refreshToken := r.FormValue("refresh_token")
-
-		err = manager.RemoveAccessToken(accessToken)
+		err := manager.RemoveAccessToken(context.TODO(), accessToken)
 		if err != nil {
 			logrus.Error("RemoveAccessToken", err)
 		}
 
-		err = manager.RemoveRefreshToken(refreshToken)
-		if err != nil {
-			logrus.Error("RemoveRefreshToken", err)
-		}
-		w.Write([]byte("Success"))
-	}, srv))
-
-	http.HandleFunc("/protected", validateToken(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello, I'm protected"))
-	}, srv))
-
-	log.Fatal(http.ListenAndServe(":9096", nil))
-}
-
-func validateToken(f http.HandlerFunc, srv *server.Server) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := srv.ValidationBearerToken(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		f.ServeHTTP(w, r)
+		ctx.JSON(http.StatusOK, gin.H{"message": "Success"})
 	})
+
+	g.GET("/protected", ginserver.HandleTokenVerify(ginserver.Config{
+		ErrorHandleFunc: func(ctx *gin.Context, err error) {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"message": err.Error()})
+			ctx.Abort()
+		},
+	}), func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, gin.H{"message": "Hello, I'm protected"})
+	})
+
+	g.Run(":9096")
 }
