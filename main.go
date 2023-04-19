@@ -83,6 +83,22 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"client_id": clientId, "client_secret": clientSecret})
 	})
 
+	http.Handle("/revocation", validateToken(func(w http.ResponseWriter, r *http.Request) {
+		accessToken := r.FormValue("access_token")
+		refreshToken := r.FormValue("refresh_token")
+
+		err = manager.RemoveAccessToken(accessToken)
+		if err != nil {
+			logrus.Error("RemoveAccessToken", err)
+		}
+
+		err = manager.RemoveRefreshToken(refreshToken)
+		if err != nil {
+			logrus.Error("RemoveRefreshToken", err)
+		}
+		w.Write([]byte("Success"))
+	}, srv))
+
 	http.HandleFunc("/protected", validateToken(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello, I'm protected"))
 	}, srv))
